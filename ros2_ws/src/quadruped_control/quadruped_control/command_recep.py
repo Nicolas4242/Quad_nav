@@ -9,25 +9,25 @@ from std_msgs.msg import String
 
 
 # --- BLOC 1/5 : imports et paramètres du programme d'origine ---
-# import serial
-# import threading
-# import time
+import serial
+import threading
+import time
 #
-# SERIAL_PORT = '/dev/ttyUSB0'
-# BAUD_RATE = 115200
+SERIAL_PORT = '/dev/ttyUSB0'
+BAUD_RATE = 115200
 # --- FIN BLOC 1/5 ---
 
 
 # --- BLOC 2/5 : lecture des réponses, en parallèle de ROS ---
-# def read_from_arduino(ser):
-#     while True:
-#         try:
-#             line = ser.readline().decode('utf-8', errors='ignore').strip()
-#             if line:
-#                 print(f'\nArduino says: {line}')
-#         except Exception as e:
-#             print(f'\nRead error: {e}')
-#             break
+def read_from_arduino(ser):
+    while True:
+        try:
+            line = ser.readline().decode('utf-8', errors='ignore').strip()
+            if line:
+                print(f'\nArduino says: {line}')
+        except Exception as e:
+            print(f'\nRead error: {e}')
+            break
 # --- FIN BLOC 2/5 ---
 # Seul l'affichage "Command > " a été retiré de la lecture d'origine :
 # la saisie au clavier se trouve maintenant dans le programme émetteur.
@@ -53,7 +53,7 @@ class CommandReceiver(Node):
         self.get_logger().info(f'Commande acceptée : "{command}"')
 
         # --- BLOC 3/5 : même envoi que dans le programme d'origine ---
-        # self.ser.write((command + '\n').encode('utf-8'))
+        self.ser.write((command + '\n').encode('utf-8'))
         # --- FIN BLOC 3/5 ---
 
 
@@ -62,28 +62,28 @@ def main(args=None):
     node = None
 
     # --- BLOC 4/5 : variables pour fermer la connexion même en cas d'erreur ---
-    # ser = None
+    ser = None
     # --- FIN BLOC 4/5 (première partie) ---
 
     try:
         node = CommandReceiver()
 
         # --- BLOC 4/5 (suite) : ouverture et démarrage de la lecture ---
-        # try:
-        #     ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
-        # except Exception as e:
-        #     print('Could not open serial port.')
-        #     print(e)
-        #     print('Check if CP2102 is connected and if the port is /dev/ttyUSB0.')
-        #     return
+        try:
+            ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+        except Exception as e:
+            print('Could not open serial port.')
+            print(e)
+            print('Check if CP2102 is connected and if the port is /dev/ttyUSB0.')
+            return
         #
-        # time.sleep(2)
-        # node.ser = ser
-        # print('Connected to Arduino through CP2102.')
+        time.sleep(2)
+        node.ser = ser
+        print('Connected to Arduino through CP2102.')
         #
-        # reader_thread = threading.Thread(
-        #     target=read_from_arduino, args=(ser,), daemon=True)
-        # reader_thread.start()
+        reader_thread = threading.Thread(
+            target=read_from_arduino, args=(ser,), daemon=True)
+        reader_thread.start()
         # --- FIN BLOC 4/5 ---
 
         print('Récepteur prêt : start, stand, stop, status. Ctrl+C pour quitter.')
@@ -95,8 +95,8 @@ def main(args=None):
     finally:
         try:
             # --- BLOC 5/5 : fermer le port, comme dans le programme d’origine ---
-            # if ser is not None:
-            #     ser.close()
+            if ser is not None:
+                ser.close()
             # --- FIN BLOC 5/5 ---
             pass  # Garde le bloc try valide en mode diagnostic.
         finally:
