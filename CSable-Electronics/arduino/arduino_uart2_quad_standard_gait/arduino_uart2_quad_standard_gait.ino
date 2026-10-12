@@ -3,6 +3,24 @@
 #include <ctype.h>
 #include <string.h>
 
+
+// ===========================
+// Implémentation gyroscope
+// ===========================
+// --- AJOUT : Capteur BNO055 ---
+#include <Wire.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BNO055.h>
+#include <utility/imumaths.h>
+
+Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x28);
+bool bnoReady = false;
+
+// Période d'envoi IMU vers la Raspberry Pi (20 ms = 50 Hz, idéal pour ROS)
+const unsigned long IMU_PERIOD_MS = 20;
+unsigned long lastImuMs = 0;
+// ------------------------------
+
 // =====================================================
 // Arduino Mega 2560 + ROBOTIS DYNAMIXEL Shield
 // Quadruped standard gait converted from MATLAB files:
@@ -81,7 +99,7 @@ const float MAX_SPEED_RAD_PER_SEC = MAX_SPEED_DEG_PER_SEC * DEG_TO_RAD_F;
 const float MAX_DELTA_ANGLE = MAX_SPEED_RAD_PER_SEC * TS;
 
 // Periodic Arduino -> Raspberry Pi scan/status.
-const unsigned long STATUS_PERIOD_MS = 500;
+const unsigned long STATUS_PERIOD_MS = 5000;
 
 // =====================================================
 // Motor types and configuration
@@ -835,6 +853,28 @@ void pollCommandSerial() {
   }
 }
 
+// ============================
+// Implémentation gyro
+// ============================
+
+// Envoi de la trame IMU vers la Raspberry Pi via UART2
+void sendImuData() {
+  if (!bnoReady) return;
+
+  // Lecture des vecteurs (accélération en m/s², gyro en rad/s)
+  imu::Vector<3> accel = bno.getVector(Adafruit_BNO055::VECTOR_ACCELEROMETER);
+  imu::Vector<3> gyro  = bno.getVector(Adafruit_BNO055::VECTOR_GYROSCOPE);
+
+  // Format : IMU,ax,ay,az,gx,gy,gz
+  CMD_SERIAL.print("IMU,");
+  CMD_SERIAL.print(accel.x(), 3); CMD_SERIAL.print(",");
+  CMD_SERIAL.print(accel.y(), 3); CMD_SERIAL.print(",");
+  CMD_SERIAL.print(accel.z(), 3); CMD_SERIAL.print(",");
+  CMD_SERIAL.print(gyro.x(), 3);  CMD_SERIAL.print(",");
+  CMD_SERIAL.print(gyro.y(), 3);  CMD_SERIAL.print(",");
+  CMD_SERIAL.println(gyro.z(), 3);
+}
+
 // =====================================================
 // Arduino setup and nonblocking control loop
 // =====================================================
@@ -844,6 +884,23 @@ void setup() {
   CMD_SERIAL.begin(CMD_BAUDRATE);
   delay(300);
   sendLine("BOOT,uart2_ready,baud=115200,robot=quadruped_standard_gait");
+
+//=========================
+// Implémentation gyro
+//=========================
+  // --- AJOUT : Initialisation BNO055 ---
+  Wire.begin();
+  Wire.setClock(400000); // I2C Fast Mode (400 kHz) pour minimiser le temps de lecture
+
+  if (bno.begin()) {
+    bno.setExtCrystalUse(true);
+    bnoReady = true;
+    sendLine("OK,bno055_initialized");
+  } else {
+    sendLine("WARN,bno055_not_found_check_wiring");
+  }
+  // ------------------------------------
+
   sendLine("INFO,connect_raspberrypi_TX_to_Arduino_RX2_pin17");
   sendLine("INFO,connect_raspberrypi_RX_to_Arduino_TX2_pin16_level_shift_recommended");
 
@@ -938,4 +995,10 @@ void loop() {
     lastStatusMs = nowMs;
     sendStatus(false);  // periodic scan without motor reads, to keep 100 Hz loop light.
   }
+  // --- AJOUT : Envoi périodique IMU (50 Hz) ---
+  if (nowMs - lastImuMs >= IMU_PERIOD_MS) {
+    lastImuMs = nowMs;
+    sendImuData();
+  }
+  // ---------------------------------------------
 }
