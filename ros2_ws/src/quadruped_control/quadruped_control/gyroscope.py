@@ -9,11 +9,11 @@ class ImuPublisher(Node):
         self.publisher_ = self.create_publisher(Imu, 'imu/data', 10)
         
         # Port série de l'Arduino Mega
-        self.serial_port = serial.Serial('/dev/serial0', 115200, timeout=1.0)
+        self.serial_port = serial.Serial('/dev/ttyUSB0', 115200, timeout=1.0)
         
         # Timer à 50 Hz pour scruter le port série
         self.timer = self.create_timer(0.02, self.read_serial_and_publish)
-        self.get_logger().info('Nœud IMU démarré sur /dev/serial0')
+        self.get_logger().info('Nœud IMU démarré sur /dev/ttyUSB0')
 
     def read_serial_and_publish(self):
         if not self.serial_port.in_waiting:
