@@ -105,8 +105,7 @@ const unsigned long STATUS_PERIOD_MS = 5000;
 // Motor types and configuration
 // =====================================================
 enum MotorType {
-  MOTOR_XM430_W350_R,
-  MOTOR_AX12A
+  MOTOR_XM430_W350_R
 };
 
 struct MotorConfig {
@@ -123,7 +122,7 @@ struct MotorConfig {
 
 // Order of X-Series leg motors matches MATLAB hw_params.DXL_IDS:
 // [FR thigh, FR crank, FL thigh, FL crank, RR thigh, RR crank, RL thigh, RL crank]
-// AX order matches MATLAB hw_params.AX_IDS: [11,12,13,14] = [FL-Z, FR-Z, RL-Z, RR-Z]
+// Z joint order: [FL-Z, FR-Z, RL-Z, RR-Z]. Replacement IDs are NOT assigned.
 enum MotorIndex {
   FR_THIGH = 0,
   FR_CRANK = 1,
@@ -133,11 +132,13 @@ enum MotorIndex {
   RR_CRANK = 5,
   RL_THIGH = 6,
   RL_CRANK = 7,
-  AX_FL_Z  = 8,
-  AX_FR_Z  = 9,
-  AX_RL_Z  = 10,
-  AX_RR_Z  = 11
+  FL_Z  = 8,
+  FR_Z  = 9,
+  RL_Z  = 10,
+  RR_Z  = 11
 };
+
+const uint8_t UNCONFIGURED_MOTOR_ID = 255; // Invalid ID; never send to it.
 
 MotorConfig motors[] = {
   // name,       id, type,              proto, maxDeg, maxRaw, tol, direction, offsetRad
@@ -153,22 +154,76 @@ MotorConfig motors[] = {
   {"RL_THIGH",  5,  MOTOR_XM430_W350_R, 2.0f, 360.0f, 4095, 30, -1,   0.0f * DEG_TO_RAD_F},
   {"RL_CRANK",  6,  MOTOR_XM430_W350_R, 2.0f, 360.0f, 4095, 30, -1,   0.0f * DEG_TO_RAD_F},
 
-  // TODO(Stage 2): Calibrate the four replacement XM430 Z joints on the real robot:
-  // IDs, directions, offsets, and mechanical limits. Keep these AX entries until verified.
-  {"AX_FL_Z",  11,  MOTOR_AX12A,        1.0f, 300.0f, 1023, 10,  1,   0.0f},
-  {"AX_FR_Z",  12,  MOTOR_AX12A,        1.0f, 300.0f, 1023, 10,  1,   0.0f},
-  {"AX_RL_Z",  13,  MOTOR_AX12A,        1.0f, 300.0f, 1023, 10,  1,   0.0f},
-  {"AX_RR_Z",  14,  MOTOR_AX12A,        1.0f, 300.0f, 1023, 10,  1,   0.0f}
+  // TODO(calibration): Replace only physically verified IDs, hold tolerances (raw),
+  // directions (+1/-1), and software offsets (rad). Sentinels intentionally block motion.
+  {"FL_Z", UNCONFIGURED_MOTOR_ID, MOTOR_XM430_W350_R, 2.0f, 360.0f, 4095, -1, 0, NAN},
+  {"FR_Z", UNCONFIGURED_MOTOR_ID, MOTOR_XM430_W350_R, 2.0f, 360.0f, 4095, -1, 0, NAN},
+  {"RL_Z", UNCONFIGURED_MOTOR_ID, MOTOR_XM430_W350_R, 2.0f, 360.0f, 4095, -1, 0, NAN},
+  {"RR_Z", UNCONFIGURED_MOTOR_ID, MOTOR_XM430_W350_R, 2.0f, 360.0f, 4095, -1, 0, NAN}
 };
 
 const int LEG_MOTOR_COUNT = 8;
-const int AX_MOTOR_COUNT = 4;
+const int Z_MOTOR_COUNT = 4;
 const int ALL_MOTOR_COUNT = sizeof(motors) / sizeof(motors[0]);
 
-// TODO(Stage 2): Calibrate neutral Z holding positions for the replacement XM430 motors;
-// these values are the existing AX-12A positions and must not be reused as XM430 calibration.
-const float AX_HOLD_DEG[AX_MOTOR_COUNT] = {152.0f, 152.0f, 150.0f, 148.0f};
-const int AX_INDICES[AX_MOTOR_COUNT] = {AX_FL_Z, AX_FR_Z, AX_RL_Z, AX_RR_Z};
+const int Z_INDICES[Z_MOTOR_COUNT] = {FL_Z, FR_Z, RL_Z, RR_Z};
+
+struct ZAxisCalibration {
+  bool verified;                 // Deliberate physical sign-off; see README.
+  float neutralJointRad;        // MODEL joint angle, not absolute motor angle.
+  int32_t minRaw;               // Calibrated mechanical bounds in absolute motor counts.
+  int32_t maxRaw;               // Must match the provisioned XM430 position limits.
+  int32_t startupToleranceRaw;  // Maximum approved correction from manually placed neutral.
+  int32_t profileVelocityRaw;   // Velocity-based profile, strictly positive.
+  int32_t profileAccelerationRaw; // Strictly positive; zero is unlimited.
+  int32_t expectedDriveMode;    // Only 0/1: velocity profile, no torque-on-goal-update.
+  int32_t expectedHomingOffsetRaw; // INTERNAL offset; distinct from MotorConfig.offsetRad.
+  int32_t expectedFirmwareVersion;
+  int32_t expectedPwmLimitRaw;
+  int32_t expectedCurrentLimitRaw;
+  int32_t expectedVelocityLimitRaw;
+};
+
+// TODO(calibration): Fill every field from bench measurements and verified internal
+// settings, then set verified=true for EACH joint. No motion-capable defaults.
+const ZAxisCalibration zCalibration[Z_MOTOR_COUNT] = {
+  {false, NAN, -1, -1, -1, -1, -1, -1, INT32_MIN, -1, -1, -1, -1}, // FL_Z
+  {false, NAN, -1, -1, -1, -1, -1, -1, INT32_MIN, -1, -1, -1, -1}, // FR_Z
+  {false, NAN, -1, -1, -1, -1, -1, -1, INT32_MIN, -1, -1, -1, -1}, // RL_Z
+  {false, NAN, -1, -1, -1, -1, -1, -1, INT32_MIN, -1, -1, -1, -1}  // RR_Z
+};
+const unsigned long Z_SETTLE_TIMEOUT_MS = 5000;
+const unsigned long Z_SETTLE_DWELL_MS = 200;
+
+struct LegStartupCalibration {
+  bool verified; // Mechanical safe interval and complete startup corridor checked on robot.
+  int32_t minRaw;
+  int32_t maxRaw;
+  int32_t startToleranceRaw; // Approved initial deviation from the existing START_X/Y pose.
+  int32_t holdToleranceRaw;  // Approved change at torque enable / measured-position hold.
+  int32_t expectedDriveMode;
+  int32_t expectedHomingOffsetRaw;
+};
+// TODO(commissioning): No mechanical ranges or acceptable starting errors are known here.
+// These entries supplement, and never replace, the original eight MotorConfig mappings.
+const LegStartupCalibration legStartup[LEG_MOTOR_COUNT] = {
+  {false, -1, -1, -1, -1, -1, INT32_MIN}, // FR_THIGH
+  {false, -1, -1, -1, -1, -1, INT32_MIN}, // FR_CRANK
+  {false, -1, -1, -1, -1, -1, INT32_MIN}, // FL_THIGH
+  {false, -1, -1, -1, -1, -1, INT32_MIN}, // FL_CRANK
+  {false, -1, -1, -1, -1, -1, INT32_MIN}, // RR_THIGH
+  {false, -1, -1, -1, -1, -1, INT32_MIN}, // RR_CRANK
+  {false, -1, -1, -1, -1, -1, INT32_MIN}, // RL_THIGH
+  {false, -1, -1, -1, -1, -1, INT32_MIN}  // RL_CRANK
+};
+// Physical sign-off must cover support against collapse on torque-off, the starting
+// posture/collision corridor, bus timing and the supervision/fault response below.
+// Not a calibration bypass: ALL motor checks must also pass. No serial unlock exists.
+const bool MOTION_COMMISSIONING_VERIFIED = false;
+const uint32_t DXL_IO_TIMEOUT_MS = 2;
+const unsigned long Z_MONITOR_PERIOD_MS = 10; // One motor per slot; nominal full round 40 ms.
+const unsigned long Z_MONITOR_MAX_AGE_MS = 200;
+const unsigned long Z_MONITOR_BUDGET_US = 3000;
 
 // =====================================================
 // Kinematic constants from inverse_kinematics.m and forward_kinematics.m
@@ -228,12 +283,33 @@ unsigned long nextLoopMs = 0;
 unsigned long lastStatusMs = 0;
 bool hardwareReady = false;
 bool torqueEnabled = false;
+bool zCalibrationReady = false;
+bool zAxisReady = false;
+bool torqueOffUnconfirmed = true; // Bus requests cannot prove power removal.
+int32_t zNeutralRaw[Z_MOTOR_COUNT];
+bool legStartupReady = false;
+int32_t legStartRaw[LEG_MOTOR_COUNT];
+int32_t legHoldRaw[LEG_MOTOR_COUNT];
+unsigned long zLastGoodMs[Z_MOTOR_COUNT];
+unsigned long nextZMonitorMs = 0;
+uint8_t nextZMonitor = 0;
+int faultMotorIndex = -1;
+bool torqueOffDispatchAcknowledged = false;
 
 char cmdBuffer[64];
 uint8_t cmdLen = 0;
 
 // Forward declaration because smoothStandupBlocking() keeps UART2 active.
 void pollCommandSerial();
+void safeCleanup();
+bool readZItem(int z, uint8_t item, int32_t &value);
+bool readMotorItem(int motorIndex, uint8_t item, int32_t &value);
+bool dxlExchangeOK();
+bool inverseKinematics(float x, float y, float q[2]);
+void stopForFault(const char* reason);
+bool revalidateZReady();
+bool zFeedbackFresh();
+void serviceZMonitor(unsigned long deadlineMs);
 
 // =====================================================
 // Utility functions
@@ -321,6 +397,12 @@ void sendStatus(bool includeMotorRead) {
   CMD_SERIAL.print(hardwareReady ? 1 : 0);
   CMD_SERIAL.print(",torque=");
   CMD_SERIAL.print(torqueEnabled ? 1 : 0);
+  CMD_SERIAL.print(F(",z_calibrated="));
+  CMD_SERIAL.print(zCalibrationReady ? 1 : 0);
+  CMD_SERIAL.print(F(",z_ready="));
+  CMD_SERIAL.print(zAxisReady ? 1 : 0);
+  CMD_SERIAL.print(F(",torque_off_unconfirmed="));
+  CMD_SERIAL.print(torqueOffUnconfirmed ? 1 : 0);
   CMD_SERIAL.print(",phase=");
   CMD_SERIAL.print(phaseIdx);
   CMD_SERIAL.print(",ncyc=");
@@ -334,23 +416,27 @@ void sendStatus(bool includeMotorRead) {
   if (includeMotorRead && hardwareReady) {
     CMD_SERIAL.print(",raw_leg=");
     for (int i = 0; i < LEG_MOTOR_COUNT; i++) {
-      dxl.setPortProtocolVersion(motors[i].protocol);
-      int32_t raw = (int32_t)dxl.getPresentPosition(motors[i].id, UNIT_RAW);
+      int32_t raw;
+      bool ok = readMotorItem(i, PRESENT_POSITION, raw);
+      if (!ok) { faultMotorIndex = i; stopForFault("status_read_failed"); return; }
       CMD_SERIAL.print(motors[i].id);
       CMD_SERIAL.print(":");
-      CMD_SERIAL.print(raw);
+      if (ok) CMD_SERIAL.print(raw);
+      else CMD_SERIAL.print(F("ERR"));
       if (i < LEG_MOTOR_COUNT - 1) CMD_SERIAL.print("/");
     }
 
     CMD_SERIAL.print(",raw_z=");
-    for (int j = 0; j < AX_MOTOR_COUNT; j++) {
-      int idx = AX_INDICES[j];
-      dxl.setPortProtocolVersion(motors[idx].protocol);
-      int32_t raw = (int32_t)dxl.getPresentPosition(motors[idx].id, UNIT_RAW);
+    for (int j = 0; j < Z_MOTOR_COUNT; j++) {
+      int idx = Z_INDICES[j];
+      int32_t raw;
+      bool ok = readMotorItem(idx, PRESENT_POSITION, raw);
+      if (!ok) { faultMotorIndex = idx; stopForFault("status_read_failed"); return; }
       CMD_SERIAL.print(motors[idx].id);
       CMD_SERIAL.print(":");
-      CMD_SERIAL.print(raw);
-      if (j < AX_MOTOR_COUNT - 1) CMD_SERIAL.print("/");
+      if (ok) CMD_SERIAL.print(raw);
+      else CMD_SERIAL.print(F("ERR"));
+      if (j < Z_MOTOR_COUNT - 1) CMD_SERIAL.print("/");
     }
   }
 
@@ -365,34 +451,18 @@ void selectMotorProtocol(int motorIndex) {
 }
 
 int32_t motorAbsRadToRaw(int motorIndex, float motorAbsRad) {
-  MotorConfig m = motors[motorIndex];
-
-  if (m.type == MOTOR_XM430_W350_R) {
-    motorAbsRad = normalizeRadPositive(motorAbsRad);
-    int32_t raw = (int32_t)roundf(motorAbsRad * (4096.0f / TWO_PI_F));
-    raw = (int32_t)clampFloat((float)raw, 0.0f, 4095.0f);
-    return raw;
-  }
-
-  // AX-12A: 0..300 deg -> 0..1023.
-  float maxRad = m.maxDegree * DEG_TO_RAD_F;
-  motorAbsRad = clampFloat(motorAbsRad, 0.0f, maxRad);
-  int32_t raw = (int32_t)roundf(motorAbsRad * ((float)m.maxRaw / maxRad));
-  raw = (int32_t)clampFloat((float)raw, 0.0f, (float)m.maxRaw);
+  (void)motorIndex; // Retain the baseline helper signature; all motors now use XM encoding.
+  // Preserve the eight walking motors' encoding. Z uses zJointRadToRawChecked().
+  motorAbsRad = normalizeRadPositive(motorAbsRad);
+  int32_t raw = (int32_t)roundf(motorAbsRad * (4096.0f / TWO_PI_F));
+  raw = (int32_t)clampFloat((float)raw, 0.0f, 4095.0f);
   return raw;
 }
 
 float motorRawToAbsRad(int motorIndex, int32_t raw) {
-  MotorConfig m = motors[motorIndex];
-
-  if (m.type == MOTOR_XM430_W350_R) {
-    raw = (int32_t)clampFloat((float)raw, 0.0f, 4095.0f);
-    return ((float)raw) * (TWO_PI_F / 4096.0f);
-  }
-
-  raw = (int32_t)clampFloat((float)raw, 0.0f, (float)m.maxRaw);
-  float maxRad = m.maxDegree * DEG_TO_RAD_F;
-  return ((float)raw) * (maxRad / (float)m.maxRaw);
+  (void)motorIndex;
+  raw = (int32_t)clampFloat((float)raw, 0.0f, 4095.0f);
+  return ((float)raw) * (TWO_PI_F / 4096.0f);
 }
 
 int32_t jointRadToMotorRaw(int motorIndex, float modelRad) {
@@ -411,53 +481,356 @@ float motorRawToJointRad(int motorIndex, int32_t raw, float referenceModelRad) {
 // =====================================================
 // Motor setup and command functions
 // =====================================================
-bool setupOneMotor(int motorIndex) {
-  MotorConfig m = motors[motorIndex];
+bool configuredMotorId(uint8_t id) {
+  return id <= 252; // Exclude reserved IDs, broadcast (254), and unset (255).
+}
 
+bool dxlExchangeOK() {
+  return dxl.getLastLibErrCode() == 0 && dxl.getLastStatusPacketError() == 0;
+}
+
+bool zFailure(int z, const __FlashStringHelper* reason) {
+  faultMotorIndex = Z_INDICES[z];
+  zAxisReady = false;
+  // Dispatch shutdown before serial diagnostics can block on a full TX buffer.
+  mode = MODE_STOPPED;
+  safeCleanup();
+  CMD_SERIAL.print(F("ERR,z_axis,joint="));
+  CMD_SERIAL.print(motors[Z_INDICES[z]].name);
+  CMD_SERIAL.print(F(",reason="));
+  CMD_SERIAL.println(reason);
+  return false;
+}
+
+bool zJointRadToRawChecked(int z, float modelRad, int32_t &raw) {
+  const MotorConfig &m = motors[Z_INDICES[z]];
+  const ZAxisCalibration &c = zCalibration[z];
+  if (isInvalid(modelRad) || isInvalid(m.offsetRad) ||
+      (m.direction != 1 && m.direction != -1)) return false;
+  float motorAbsRad = m.offsetRad + ((float)m.direction * modelRad);
+  // Z limits describe one continuous single-turn interval. Never wrap or clamp.
+  float counts = motorAbsRad * (4096.0f / TWO_PI_F);
+  if (isInvalid(counts) || counts < 0.0f || counts > 4095.0f) return false;
+  raw = (int32_t)roundf(counts);
+  return c.minRaw >= 0 && c.maxRaw <= 4095 && c.minRaw < c.maxRaw &&
+         raw >= c.minRaw && raw <= c.maxRaw;
+}
+
+bool validateZCalibration() {
+  for (int z = 0; z < Z_MOTOR_COUNT; z++) {
+    const MotorConfig &m = motors[Z_INDICES[z]];
+    const ZAxisCalibration &c = zCalibration[z];
+    if (!c.verified || !configuredMotorId(m.id) ||
+        m.type != MOTOR_XM430_W350_R || m.protocol != 2.0f ||
+        m.maxRaw != 4095 || m.maxDegree != 360.0f ||
+        !zJointRadToRawChecked(z, c.neutralJointRad, zNeutralRaw[z]) ||
+        c.startupToleranceRaw < 0 || c.startupToleranceRaw > c.maxRaw - c.minRaw ||
+        m.tolerance < 0 || m.tolerance > c.startupToleranceRaw ||
+        c.profileVelocityRaw <= 0 || c.profileVelocityRaw > 32767 ||
+        c.profileAccelerationRaw <= 0 || c.profileAccelerationRaw > 32767 ||
+        (c.expectedDriveMode != 0 && c.expectedDriveMode != 1) ||
+        c.expectedHomingOffsetRaw < -1024 || c.expectedHomingOffsetRaw > 1024 ||
+        c.expectedFirmwareVersion <= 0 || c.expectedFirmwareVersion > 255 ||
+        c.expectedPwmLimitRaw <= 0 || c.expectedPwmLimitRaw > 885 ||
+        c.expectedCurrentLimitRaw <= 0 || c.expectedCurrentLimitRaw > 1193 ||
+        c.expectedVelocityLimitRaw <= 0 || c.expectedVelocityLimitRaw > 1023 ||
+        c.profileVelocityRaw > c.expectedVelocityLimitRaw) {
+      return zFailure(z, F("calibration_missing_or_invalid"));
+    }
+    for (int i = 0; i < ALL_MOTOR_COUNT; i++) {
+      if (i != Z_INDICES[z] && motors[i].id == m.id)
+        return zFailure(z, F("duplicate_id"));
+    }
+  }
+  return true;
+}
+
+bool readMotorItem(int motorIndex, uint8_t item, int32_t &value) {
+  if (!configuredMotorId(motors[motorIndex].id)) return false;
   selectMotorProtocol(motorIndex);
-  delay(20);
+  DYNAMIXEL::ControlTableItemInfo_t info = DYNAMIXEL::getControlTableItemInfo(XM430_W350, item);
+  if (item == STARTUP_CONFIGURATION || item == BUS_WATCHDOG) {
+    info.addr = (item == STARTUP_CONFIGURATION) ? 60 : 98;
+    info.addr_length = 1; // Correct the library 0.8.2 XM430 table entries.
+  }
+  if (info.addr_length == 0 || info.addr_length > 4) return false;
+  uint8_t bytes[4] = {0, 0, 0, 0};
+  if (dxl.read(motors[motorIndex].id, info.addr, info.addr_length, bytes, sizeof(bytes),
+               DXL_IO_TIMEOUT_MS) != info.addr_length || !dxlExchangeOK()) return false;
+  // Unlike readControlTableItem(), keep unsigned 1/2-byte registers unsigned.
+  // Four-byte position/velocity/homing values retain their signed bit pattern.
+  uint32_t bits = (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8) |
+                  ((uint32_t)bytes[2] << 16) | ((uint32_t)bytes[3] << 24);
+  memcpy(&value, &bits, sizeof(value));
+  return true;
+}
 
-  if (!dxl.ping(m.id)) {
-    CMD_SERIAL.print("ERR,ping_failed,id=");
-    CMD_SERIAL.println(m.id);
+bool expectMotorItem(int motorIndex, uint8_t item, int32_t expected) {
+  int32_t actual;
+  return readMotorItem(motorIndex, item, actual) && actual == expected;
+}
+
+bool writeMotorItem(int motorIndex, uint8_t item, int32_t value) {
+  if (!zCalibrationReady || !legStartupReady || !MOTION_COMMISSIONING_VERIFIED ||
+      mode == MODE_STOPPED || !configuredMotorId(motors[motorIndex].id)) return false;
+  DYNAMIXEL::ControlTableItemInfo_t info = DYNAMIXEL::getControlTableItemInfo(XM430_W350, item);
+  if (info.addr_length == 0 || info.addr_length > 4) return false;
+  uint32_t bits = (uint32_t)value;
+  uint8_t bytes[4] = {(uint8_t)bits, (uint8_t)(bits >> 8), (uint8_t)(bits >> 16), (uint8_t)(bits >> 24)};
+  selectMotorProtocol(motorIndex);
+  return dxl.write(motors[motorIndex].id, info.addr, bytes, info.addr_length, DXL_IO_TIMEOUT_MS) && dxlExchangeOK();
+}
+
+bool readZItem(int z, uint8_t item, int32_t &value) {
+  if (!zCalibrationReady) return false;
+  if (readMotorItem(Z_INDICES[z], item, value)) return true;
+  return zFailure(z, F("read_failed"));
+}
+
+bool expectZItem(int z, uint8_t item, int32_t expected) {
+  int32_t actual;
+  if (!readZItem(z, item, actual)) return false;
+  if (actual == expected) return true;
+  zFailure(z, F("setting_mismatch"));
+  CMD_SERIAL.print(F("ERR,z_setting,item="));
+  CMD_SERIAL.print(item);
+  CMD_SERIAL.print(F(",expected="));
+  CMD_SERIAL.print(expected);
+  CMD_SERIAL.print(F(",actual="));
+  CMD_SERIAL.println(actual);
+  return false;
+}
+
+bool writeZItemChecked(int z, uint8_t item, int32_t value) {
+  if (!zCalibrationReady || mode == MODE_STOPPED ||
+      !configuredMotorId(motors[Z_INDICES[z]].id)) return false;
+  if (!writeMotorItem(Z_INDICES[z], item, value))
+    return zFailure(z, F("write_failed"));
+  return expectZItem(z, item, value);
+}
+
+bool readZStartupPosition(int z, int32_t &raw) {
+  const ZAxisCalibration &c = zCalibration[z];
+  int32_t velocity;
+  if (!readZItem(z, PRESENT_POSITION, raw) || !readZItem(z, PRESENT_VELOCITY, velocity)) return false;
+  // Torque-on resets the position counter in position mode. Reject ambiguous turns
+  // instead of normalizing, including a turn hidden by the internal homing offset.
+  if (raw < c.minRaw || raw > c.maxRaw ||
+      raw - c.expectedHomingOffsetRaw < 0 || raw - c.expectedHomingOffsetRaw > 4095 ||
+      labs(raw - zNeutralRaw[z]) > c.startupToleranceRaw || velocity != 0)
+    return zFailure(z, F("manually_position_near_neutral_and_stop"));
+  return true;
+}
+
+bool prepareZMotor(int z) {
+  const ZAxisCalibration &c = zCalibration[z];
+  // All Z joints have already received torque-off before any preparation.
+  // Provision EEPROM during calibration. Reject mismatches instead of rewriting
+  // direction, homing or mode here (mode changes can reset gains/position).
+  if (!expectZItem(z, MODEL_NUMBER, XM430_W350) ||
+      !expectZItem(z, FIRMWARE_VERSION, c.expectedFirmwareVersion) ||
+      !expectZItem(z, TORQUE_ENABLE, 0) ||
+      !expectZItem(z, OPERATING_MODE, 3) || // XM430 Position Control Mode (OP_POSITION).
+      !expectZItem(z, DRIVE_MODE, c.expectedDriveMode) ||
+      !expectZItem(z, HOMING_OFFSET, c.expectedHomingOffsetRaw) ||
+      !expectZItem(z, MIN_POSITION_LIMIT, c.minRaw) ||
+      !expectZItem(z, MAX_POSITION_LIMIT, c.maxRaw) ||
+      !expectZItem(z, PWM_LIMIT, c.expectedPwmLimitRaw) ||
+      !expectZItem(z, CURRENT_LIMIT, c.expectedCurrentLimitRaw) ||
+      !expectZItem(z, VELOCITY_LIMIT, c.expectedVelocityLimitRaw) ||
+      !expectZItem(z, STATUS_RETURN_LEVEL, 2) ||
+      !expectZItem(z, REGISTERED_INSTRUCTION, 0) ||
+      !expectZItem(z, HARDWARE_ERROR_STATUS, 0) ||
+      !expectZItem(z, BUS_WATCHDOG, 0)) return false;
+  int32_t secondaryId;
+  if (!readZItem(z, SECONDARY_ID, secondaryId)) return false;
+  if (secondaryId < 253) return zFailure(z, F("secondary_id_must_be_disabled"));
+  if (c.expectedFirmwareVersion >= 45 && !expectZItem(z, STARTUP_CONFIGURATION, 0)) return false;
+  if (!writeZItemChecked(z, PROFILE_VELOCITY, c.profileVelocityRaw) ||
+      !writeZItemChecked(z, PROFILE_ACCELERATION, c.profileAccelerationRaw)) return false;
+  int32_t raw;
+  return readZStartupPosition(z, raw);
+}
+
+bool zSettleObservation(bool settled, unsigned long observedMs, unsigned long startMs,
+                        bool &observingStable, unsigned long &stableSinceMs) {
+  if (!settled || observedMs - startMs >= Z_SETTLE_TIMEOUT_MS) {
+    observingStable = false;
     return false;
   }
-
-  dxl.torqueOff(m.id);
-  delay(80);
-
-  if (m.type == MOTOR_XM430_W350_R) {
-    dxl.setOperatingMode(m.id, OP_POSITION);
-    delay(50);
-
-    // MATLAB DynamixelInterface: safe_speed_val = 0 for X-Series profile velocity.
-    dxl.writeControlTableItem(PROFILE_VELOCITY, m.id, 0);
-    dxl.writeControlTableItem(PROFILE_ACCELERATION, m.id, 20);
+  if (!observingStable) {
+    stableSinceMs = observedMs;
+    observingStable = true;
+    return false;
   }
-  else if (m.type == MOTOR_AX12A) {
-    // AX-12 joint mode, 0..300 degrees.
-    dxl.writeControlTableItem(CW_ANGLE_LIMIT, m.id, 0);
-    dxl.writeControlTableItem(CCW_ANGLE_LIMIT, m.id, m.maxRaw);
+  return observedMs - stableSinceMs >= Z_SETTLE_DWELL_MS;
+}
 
-    // Equivalent intent of MATLAB: tight hold, max torque, firm speed.
-    dxl.writeControlTableItem(MOVING_SPEED, m.id, 1023);
-    dxl.writeControlTableItem(TORQUE_LIMIT, m.id, 1023);
+bool holdZAxis() {
+  if (!zCalibrationReady || !legStartupReady || !MOTION_COMMISSIONING_VERIFIED || mode == MODE_STOPPED) return false;
+  // Preflight ALL four joints with torque off before enabling any of them.
+  for (int z = 0; z < Z_MOTOR_COUNT; z++) {
+    pollCommandSerial();
+    if (mode == MODE_STOPPED || !prepareZMotor(z)) return false;
   }
+  for (int z = 0; z < Z_MOTOR_COUNT; z++) {
+    pollCommandSerial();
+    if (mode == MODE_STOPPED) return false;
+    int32_t raw;
+    if (!readZStartupPosition(z, raw) ||
+        !writeZItemChecked(z, GOAL_POSITION, raw) || // Seed measured absolute position.
+        !expectZItem(z, TORQUE_ENABLE, 0)) return false;
+    torqueOffUnconfirmed = true;
+    if (!writeZItemChecked(z, TORQUE_ENABLE, 1)) return false;
+    int32_t enabledRaw;
+    if (!readZStartupPosition(z, enabledRaw) ||
+        labs(enabledRaw - raw) > motors[Z_INDICES[z]].tolerance)
+      return zFailure(z, F("position_changed_on_torque_enable"));
+    // Only the calibrated, bounded near-neutral correction is permitted.
+    if (!writeZItemChecked(z, GOAL_POSITION, zNeutralRaw[z])) return false;
+  }
+  unsigned long startMs = millis();
+  unsigned long stableSinceMs = 0;
+  bool observingStable = false;
+  while (millis() - startMs < Z_SETTLE_TIMEOUT_MS) {
+    pollCommandSerial();
+    if (mode == MODE_STOPPED) return false;
+    bool settled = true;
+    for (int z = 0; z < Z_MOTOR_COUNT; z++) {
+      int32_t raw, moving;
+      if (!readZItem(z, PRESENT_POSITION, raw) || !readZItem(z, MOVING, moving) ||
+          !expectZItem(z, TORQUE_ENABLE, 1) || !expectZItem(z, HARDWARE_ERROR_STATUS, 0)) return false;
+      if (raw < zCalibration[z].minRaw || raw > zCalibration[z].maxRaw)
+        return zFailure(z, F("position_outside_limits"));
+      if (labs(raw - zNeutralRaw[z]) > motors[Z_INDICES[z]].tolerance || moving != 0) {
+        settled = false;
+        faultMotorIndex = Z_INDICES[z];
+      }
+    }
+    unsigned long observedMs = millis();
+    if (observedMs - startMs >= Z_SETTLE_TIMEOUT_MS) break;
+    if (zSettleObservation(settled, observedMs, startMs, observingStable, stableSinceMs)) {
+      zAxisReady = true;
+      if (!revalidateZReady()) return false;
+      if (millis() - startMs >= Z_SETTLE_TIMEOUT_MS) break;
+      faultMotorIndex = -1;
+      CMD_SERIAL.print(F("OK,z_axis_holding_raw="));
+      for (int z = 0; z < Z_MOTOR_COUNT; z++) {
+        CMD_SERIAL.print(motors[Z_INDICES[z]].id);
+        CMD_SERIAL.print(':');
+        CMD_SERIAL.print(zNeutralRaw[z]);
+        if (z + 1 < Z_MOTOR_COUNT) CMD_SERIAL.print('/');
+      }
+      CMD_SERIAL.println();
+      return true;
+    }
+    delay(10);
+  }
+  stopForFault("z_settle_timeout");
+  return false;
+}
 
-  delay(80);
-  dxl.torqueOn(m.id);
-  delay(80);
+bool validateLegStartup() {
+  float q[2];
+  if (!inverseKinematics(START_X, START_Y, q)) return false;
+  for (int i = 0; i < LEG_MOTOR_COUNT; i++) {
+    const LegStartupCalibration &c = legStartup[i];
+    legStartRaw[i] = jointRadToMotorRaw(i, q[i % 2]);
+    if (!c.verified || c.minRaw < 0 || c.maxRaw > 4095 || c.minRaw >= c.maxRaw ||
+        c.startToleranceRaw < 0 || c.startToleranceRaw > c.maxRaw - c.minRaw ||
+        c.holdToleranceRaw < 0 || c.holdToleranceRaw > c.startToleranceRaw ||
+        legStartRaw[i] < c.minRaw || legStartRaw[i] > c.maxRaw ||
+        (c.expectedDriveMode != 0 && c.expectedDriveMode != 1) ||
+        c.expectedHomingOffsetRaw < -1024 || c.expectedHomingOffsetRaw > 1024) return false;
+  }
+  return true;
+}
 
-  CMD_SERIAL.print("OK,motor_ready,id=");
-  CMD_SERIAL.print(m.id);
-  CMD_SERIAL.print(",name=");
-  CMD_SERIAL.println(m.name);
+bool legFailure(int i) {
+  faultMotorIndex = i;
+  stopForFault("walking_motor_check_failed");
+  return false;
+}
 
+bool readLegStartupPosition(int i, int32_t &raw) {
+  const LegStartupCalibration &c = legStartup[i];
+  int32_t velocity;
+  return readMotorItem(i, PRESENT_POSITION, raw) &&
+         readMotorItem(i, PRESENT_VELOCITY, velocity) && velocity == 0 &&
+         raw >= c.minRaw && raw <= c.maxRaw &&
+         raw - c.expectedHomingOffsetRaw >= 0 && raw - c.expectedHomingOffsetRaw <= 4095 &&
+         labs(raw - legStartRaw[i]) <= c.startToleranceRaw;
+}
+
+bool prepareLegMotor(int i) {
+  const LegStartupCalibration &c = legStartup[i];
+  int32_t secondary, firmware;
+  // Provision EEPROM separately. Rewriting operating mode here can reset gains.
+  if (!expectMotorItem(i, MODEL_NUMBER, XM430_W350) ||
+      !expectMotorItem(i, TORQUE_ENABLE, 0) || !expectMotorItem(i, OPERATING_MODE, 3) ||
+      !expectMotorItem(i, DRIVE_MODE, c.expectedDriveMode) ||
+      !expectMotorItem(i, HOMING_OFFSET, c.expectedHomingOffsetRaw) ||
+      !expectMotorItem(i, MIN_POSITION_LIMIT, c.minRaw) ||
+      !expectMotorItem(i, MAX_POSITION_LIMIT, c.maxRaw) ||
+      !expectMotorItem(i, STATUS_RETURN_LEVEL, 2) ||
+      !expectMotorItem(i, REGISTERED_INSTRUCTION, 0) ||
+      !expectMotorItem(i, HARDWARE_ERROR_STATUS, 0) || !expectMotorItem(i, BUS_WATCHDOG, 0) ||
+      !readMotorItem(i, SECONDARY_ID, secondary) || secondary < 253 ||
+      !readMotorItem(i, FIRMWARE_VERSION, firmware) || firmware <= 0 ||
+      (firmware >= 45 && !expectMotorItem(i, STARTUP_CONFIGURATION, 0)) ||
+      // Preserve the original leg profile. Velocity zero is unlimited, NOT slow.
+      !writeMotorItem(i, PROFILE_VELOCITY, 0) || !expectMotorItem(i, PROFILE_VELOCITY, 0) ||
+      !writeMotorItem(i, PROFILE_ACCELERATION, 20) || !expectMotorItem(i, PROFILE_ACCELERATION, 20) ||
+      !readLegStartupPosition(i, legHoldRaw[i])) return legFailure(i);
+  return true;
+}
+
+bool setupOneMotor(int i) {
+  if (!zCalibrationReady || !legStartupReady || !MOTION_COMMISSIONING_VERIFIED ||
+      !zAxisReady || mode == MODE_STOPPED || i < 0 || i >= LEG_MOTOR_COUNT) return false;
+  if (!revalidateZReady()) return false;
+  int32_t enabledRaw;
+  // A measured absolute goal is verified while torque is still off.
+  if (!readLegStartupPosition(i, legHoldRaw[i]) ||
+      !writeMotorItem(i, GOAL_POSITION, legHoldRaw[i]) ||
+      !expectMotorItem(i, GOAL_POSITION, legHoldRaw[i]) || !expectMotorItem(i, TORQUE_ENABLE, 0))
+    return legFailure(i);
+  torqueOffUnconfirmed = true;
+  if (!writeMotorItem(i, TORQUE_ENABLE, 1) || !expectMotorItem(i, TORQUE_ENABLE, 1) ||
+      !readLegStartupPosition(i, enabledRaw) ||
+      labs(enabledRaw - legHoldRaw[i]) > legStartup[i].holdToleranceRaw ||
+      !expectMotorItem(i, HARDWARE_ERROR_STATUS, 0)) return legFailure(i);
+  return true;
+}
+
+bool verifyLegStartHolds() {
+  if (!legStartupReady || !MOTION_COMMISSIONING_VERIFIED) return false;
+  for (int i = 0; i < LEG_MOTOR_COUNT; i++) {
+    int32_t raw;
+    if (!readLegStartupPosition(i, raw) ||
+        labs(raw - legHoldRaw[i]) > legStartup[i].holdToleranceRaw ||
+        !expectMotorItem(i, GOAL_POSITION, legHoldRaw[i]) ||
+        !expectMotorItem(i, TORQUE_ENABLE, 1) || !expectMotorItem(i, HARDWARE_ERROR_STATUS, 0))
+      return legFailure(i);
+  }
   return true;
 }
 
 bool setupAllMotors() {
-  for (int i = 0; i < ALL_MOTOR_COUNT; i++) {
+  zCalibrationReady = validateZCalibration();
+  legStartupReady = validateLegStartup();
+  if (!zCalibrationReady || !legStartupReady || !MOTION_COMMISSIONING_VERIFIED || mode == MODE_STOPPED) return false;
+  // Disable all configured motors before Z preparation. A failure blocks startup.
+  safeCleanup();
+  if (torqueOffUnconfirmed) return false;
+  for (int i = 0; i < LEG_MOTOR_COUNT; i++) {
+    pollCommandSerial();
+    if (mode == MODE_STOPPED || !prepareLegMotor(i)) return false;
+  }
+  if (!holdZAxis()) return false;
+  for (int i = 0; i < LEG_MOTOR_COUNT; i++) {
+    pollCommandSerial();
+    if (mode == MODE_STOPPED) return false;
     if (!setupOneMotor(i)) {
       return false;
     }
@@ -467,12 +840,16 @@ bool setupAllMotors() {
 }
 
 void commandMotorModelRad(int motorIndex, float modelRad) {
-  if (isInvalid(modelRad)) return;
+  if (!zCalibrationReady || !legStartupReady || !MOTION_COMMISSIONING_VERIFIED ||
+      !zAxisReady || !hardwareReady || mode == MODE_STOPPED ||
+      motorIndex < 0 || motorIndex >= LEG_MOTOR_COUNT) return;
+  if (!zFeedbackFresh()) { stopForFault("z_feedback_stale"); return; }
+  if (isInvalid(modelRad)) { legFailure(motorIndex); return; }
 
   int32_t raw = jointRadToMotorRaw(motorIndex, modelRad);
 
-  selectMotorProtocol(motorIndex);
-  dxl.setGoalPosition(motors[motorIndex].id, raw, UNIT_RAW);
+  if (raw < legStartup[motorIndex].minRaw || raw > legStartup[motorIndex].maxRaw ||
+      !writeMotorItem(motorIndex, GOAL_POSITION, raw)) legFailure(motorIndex);
 }
 
 void writeAllLegsRad() {
@@ -491,27 +868,100 @@ void writeAllLegsRad() {
   commandMotorModelRad(RL_CRANK, previousAction[LEG_RL][1]);
 }
 
-void holdZAxis() {
-  // TODO(Stage 2): Apply verified XM430 Z configuration here after physical calibration.
-  for (int i = 0; i < AX_MOTOR_COUNT; i++) {
-    int motorIndex = AX_INDICES[i];
-    float rad = AX_HOLD_DEG[i] * DEG_TO_RAD_F;
-    int32_t raw = motorAbsRadToRaw(motorIndex, rad);
-
-    selectMotorProtocol(motorIndex);
-    dxl.setGoalPosition(motors[motorIndex].id, raw, UNIT_RAW);
+void safeCleanup() {
+  hardwareReady = false;
+  zAxisReady = false;
+  torqueEnabled = false;
+  bool allOff = true;
+  torqueOffDispatchAcknowledged = true;
+  int order[ALL_MOTOR_COUNT];
+  int count = 0;
+  if (faultMotorIndex >= 0 && faultMotorIndex < ALL_MOTOR_COUNT) order[count++] = faultMotorIndex;
+  for (int z = 0; z < Z_MOTOR_COUNT; z++)
+    if (Z_INDICES[z] != faultMotorIndex) order[count++] = Z_INDICES[z];
+  for (int i = 0; i < LEG_MOTOR_COUNT; i++)
+    if (i != faultMotorIndex) order[count++] = i;
+  // Dispatch every disable before readback. Each request waits at most the short
+  // receive timeout; consuming replies avoids half-duplex RS-485 collisions.
+  for (int n = 0; n < count; n++) {
+    int i = order[n];
+    if (!configuredMotorId(motors[i].id)) {
+      allOff = false;
+      torqueOffDispatchAcknowledged = false;
+      continue;
+    }
+    selectMotorProtocol(i);
+    uint8_t off = 0;
+    if (!dxl.write(motors[i].id, 64, &off, 1, DXL_IO_TIMEOUT_MS) || !dxlExchangeOK())
+      torqueOffDispatchAcknowledged = false;
   }
+  for (int n = 0; n < count; n++) {
+    int i = order[n];
+    if (!configuredMotorId(motors[i].id) || !expectMotorItem(i, TORQUE_ENABLE, 0)) allOff = false;
+  }
+  torqueOffUnconfirmed = !allOff;
+  CMD_SERIAL.print(F("STATE,torque_off_dispatch_ack="));
+  CMD_SERIAL.println(torqueOffDispatchAcknowledged ? 1 : 0);
+  if (allOff) sendLine("OK,cleanup_done");
+  else CMD_SERIAL.println(F("WARN,cleanup_incomplete_unknown_or_unresponsive_motors"));
 }
 
-void safeCleanup() {
-  for (int i = 0; i < ALL_MOTOR_COUNT; i++) {
-    selectMotorProtocol(i);
-    dxl.torqueOff(motors[i].id);
-    delay(40);
+void stopForFault(const char* reason) {
+  mode = MODE_STOPPED;
+  safeCleanup();
+  sendModeState(reason);
+}
+
+bool readZFeedback(int z) {
+  // One contiguous Protocol 2.0 read: Torque Enable(64)..Present Position(135).
+  // Validate this 72-byte read and the latency on the actual firmware/RS-485 bus.
+  uint8_t data[72];
+  int i = Z_INDICES[z];
+  unsigned long sampledMs = millis();
+  unsigned long startedUs = micros();
+  selectMotorProtocol(i);
+  if (dxl.read(motors[i].id, 64, sizeof(data), data, sizeof(data), DXL_IO_TIMEOUT_MS) != sizeof(data) ||
+      !dxlExchangeOK()) return zFailure(z, F("feedback_read_failed"));
+  if (micros() - startedUs > Z_MONITOR_BUDGET_US) return zFailure(z, F("feedback_budget_exceeded"));
+  uint32_t bits = (uint32_t)data[68] | ((uint32_t)data[69] << 8) |
+                  ((uint32_t)data[70] << 16) | ((uint32_t)data[71] << 24);
+  int32_t raw;
+  memcpy(&raw, &bits, sizeof(raw));
+  if (data[0] != 1 || data[6] != 0 || data[58] != 0 ||
+      raw < zCalibration[z].minRaw || raw > zCalibration[z].maxRaw ||
+      labs(raw - zNeutralRaw[z]) > motors[i].tolerance)
+    return zFailure(z, F("holding_readiness_lost"));
+  zLastGoodMs[z] = sampledMs;
+  return true;
+}
+
+bool revalidateZReady() {
+  if (!zCalibrationReady || !zAxisReady || !MOTION_COMMISSIONING_VERIFIED || mode == MODE_STOPPED) return false;
+  for (int z = 0; z < Z_MOTOR_COUNT; z++) if (!readZFeedback(z)) return false;
+  nextZMonitorMs = millis() + Z_MONITOR_PERIOD_MS;
+  return true;
+}
+
+bool zFeedbackFresh() {
+  if (!zAxisReady) return false;
+  unsigned long now = millis();
+  for (int z = 0; z < Z_MOTOR_COUNT; z++) {
+    if (now - zLastGoodMs[z] > Z_MONITOR_MAX_AGE_MS) {
+      faultMotorIndex = Z_INDICES[z];
+      return false;
+    }
   }
-  torqueEnabled = false;
-  hardwareReady = false;
-  sendLine("OK,cleanup_done");
+  return true;
+}
+
+void serviceZMonitor(unsigned long deadlineMs) {
+  if (!hardwareReady || mode == MODE_STOPPED) return;
+  if (!zFeedbackFresh()) { stopForFault("z_feedback_stale"); return; }
+  unsigned long now = millis();
+  if ((long)(now - nextZMonitorMs) < 0 || (long)(deadlineMs - now) < 4) return;
+  if (!readZFeedback(nextZMonitor)) return;
+  nextZMonitor = (nextZMonitor + 1) % Z_MOTOR_COUNT;
+  nextZMonitorMs = millis() + Z_MONITOR_PERIOD_MS;
 }
 
 // =====================================================
@@ -720,6 +1170,8 @@ void setAllLegActions(const float q[2]) {
 }
 
 bool smoothStandupBlocking() {
+  if (!zCalibrationReady || !zAxisReady || !hardwareReady || mode == MODE_STOPPED ||
+      !legStartupReady || !MOTION_COMMISSIONING_VERIFIED) return false;
   float qStart[2];
   float qStand[2];
 
@@ -736,7 +1188,12 @@ bool smoothStandupBlocking() {
   CMD_SERIAL.print("INFO,smooth_standup_seconds=");
   CMD_SERIAL.println(STANDUP_DURATION, 1);
 
+  // Check measured holds and Z feedback immediately before the first ramp goal.
+  if (!verifyLegStartHolds() || !revalidateZReady()) return false;
+
   for (int step = 1; step <= STANDUP_STEPS; step++) {
+    pollCommandSerial();
+    if (mode == MODE_STOPPED) return false;
     unsigned long stepStart = millis();
 
     float alpha = (float)step / (float)STANDUP_STEPS;
@@ -748,10 +1205,13 @@ bool smoothStandupBlocking() {
 
     setAllLegActions(qRamp);
     writeAllLegsRad();
+    if (mode == MODE_STOPPED) return false;
 
     // Keep accepting emergency stop/status requests during standup.
     while (millis() - stepStart < TS_MS) {
       pollCommandSerial();
+      if (mode == MODE_STOPPED) return false;
+      serviceZMonitor(stepStart + TS_MS);
       if (mode == MODE_STOPPED) return false;
       delay(1);
     }
@@ -759,6 +1219,7 @@ bool smoothStandupBlocking() {
 
   setAllLegActions(qStand);
   writeAllLegsRad();
+  if (mode == MODE_STOPPED) return false;
   sendLine("OK,standup_complete");
   return true;
 }
@@ -775,6 +1236,17 @@ void uppercaseInPlace(char* s) {
 void setMode(RunMode newMode, const char* reason) {
   if (mode == MODE_STOPPED && newMode != MODE_STOPPED) {
     sendLine("ERR,motors_stopped_reset_arduino_to_reenable");
+    return;
+  }
+
+  if (newMode != MODE_STOPPED && (!zCalibrationReady || !legStartupReady ||
+      !MOTION_COMMISSIONING_VERIFIED || !zAxisReady || !hardwareReady)) {
+    CMD_SERIAL.println(F("ERR,z_axis_not_ready_motion_blocked"));
+    return;
+  }
+
+  if (newMode != MODE_STOPPED && !zFeedbackFresh()) {
+    stopForFault("z_feedback_stale");
     return;
   }
 
@@ -888,7 +1360,7 @@ void setup() {
 
   CMD_SERIAL.begin(CMD_BAUDRATE);
   delay(300);
-  sendLine("BOOT,uart2_ready,baud=115200,robot=quadruped_standard_gait");
+  sendLine("BOOT,uart2_ready,baud=115200,robot=quadruped_12xm430");
 
 //=========================
 // Implémentation gyro
@@ -927,9 +1399,6 @@ void setup() {
 
   hardwareReady = true;
 
-  holdZAxis();
-  sendLine("OK,z_axis_holding_deg=11:152/12:152/13:150/14:148");
-
   sendLine("INFO,moving_to_standing_position_smoothly");
   if (!smoothStandupBlocking()) {
     mode = MODE_STOPPED;
@@ -949,11 +1418,13 @@ void setup() {
 void loop() {
   pollCommandSerial();
 
-  if (mode == MODE_STOPPED || !hardwareReady) {
+  if (mode == MODE_STOPPED || !hardwareReady || !zCalibrationReady || !zAxisReady) {
     digitalWrite(LED_BUILTIN, LOW);
     delay(20);
     return;
   }
+
+  if (!zFeedbackFresh()) { stopForFault("z_feedback_stale"); return; }
 
   unsigned long nowMs = millis();
 
@@ -988,6 +1459,7 @@ void loop() {
     }
 
     writeAllLegsRad();
+    if (mode == MODE_STOPPED) return;
 
     if (mode == MODE_WALKING) {
       digitalWrite(LED_BUILTIN, (phaseIdx % 10) < 5 ? HIGH : LOW);
@@ -995,6 +1467,9 @@ void loop() {
       digitalWrite(LED_BUILTIN, HIGH);
     }
   }
+
+  serviceZMonitor(nextLoopMs);
+  if (mode == MODE_STOPPED) return;
 
   if (nowMs - lastStatusMs >= STATUS_PERIOD_MS) {
     lastStatusMs = nowMs;
