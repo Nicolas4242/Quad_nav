@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="fr"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>IMU du robot</title>
+<style>
+body{font:16px system-ui;margin:24px auto;padding:0 18px;max-width:1000px;background:#f4f6f8;color:#182c40}
+section{background:white;padding:18px;margin:16px 0;border-radius:12px}h1{margin-bottom:8px}h2{font-size:18px}
+canvas{width:100%;height:230px}#state{color:#546579}.values{font:14px monospace;min-height:20px}
+</style>
+<h1>IMU · 10 dernières secondes</h1><div id="state">En attente de /imu/data…</div>
+<p><span style="color:#c73e36">● X</span> &nbsp; <span style="color:#18834b">● Y</span> &nbsp; <span style="color:#246ac7">● Z</span></p>
+<section><h2>Accélération (m/s², gravité incluse)</h2><canvas id="acc"></canvas><div class="values" id="accValues"></div></section>
+<section><h2>Vitesse angulaire (rad/s)</h2><canvas id="gyro"></canvas><div class="values" id="gyroValues"></div></section>
+<script>
+const history=[], colors=['#c73e36','#18834b','#246ac7'];
+let lastSequence=null, lastReceived=0;
+function draw(key, now){
+ const canvas=document.getElementById(key), w=canvas.clientWidth, h=230, ratio=devicePixelRatio||1;
+ canvas.width=w*ratio; canvas.height=h*ratio;
+ const ctx=canvas.getContext('2d');ctx.scale(ratio,ratio);
+ const left=55,right=w-12,top=15,bottom=200;
+ let limit=key==='acc'?12:1;
+ for(const item of history) for(const v of item[key]) limit=Math.max(limit,Math.abs(v)*1.1);
+ const x=t=>left+(t-now+10)/10*(right-left), y=v=>(top+bottom)/2-v/limit*(bottom-top)/2;
+ ctx.font='12px system-ui';ctx.strokeStyle='#e0e5ea';ctx.fillStyle='#546579';
+ for(let i=-2;i<=2;i++){const v=i*limit/2;ctx.beginPath();ctx.moveTo(left,y(v));ctx.lineTo(right,y(v));ctx.stroke();ctx.fillText(v.toFixed(1),2,y(v)+4);}
+ for(let s=0;s<=10;s+=2){ctx.fillText(`${s-10}s`,left+s/10*(right-left)-12,222);}
+ for(let axis=0;axis<3;axis++){
+  ctx.strokeStyle=colors[axis];ctx.lineWidth=2;ctx.beginPath();let previous=null;
+  for(const item of history){if(previous===null||item.t-previous>0.5)ctx.moveTo(x(item.t),y(item[key][axis]));else ctx.lineTo(x(item.t),y(item[key][axis]));previous=item.t;}
+  ctx.stroke();
+ }
+}
+async function refresh(){
+ const now=performance.now()/1000, state=document.getElementById('state');
+ try{
+  const response=await fetch('/data',{cache:'no-store',signal:AbortSignal.timeout(1500)});
+  if(!response.ok)throw new Error('HTTP');
+  const data=await response.json(), sample=data.sample;
+  if(sample&&data.fresh&&sample.sequence!==lastSequence){
+   history.push({...sample,t:now});lastSequence=sample.sequence;lastReceived=now;
+   for(const key of ['acc','gyro'])document.getElementById(key+'Values').textContent=sample[key].map((v,i)=>`${'XYZ'[i]} : ${v.toFixed(2)}`).join('     ');
+  }
+  state.textContent=!sample?'En attente de /imu/data…':data.fresh&&now-lastReceived<1?`Mesures reçues · repère ${sample.frame}`:'Plus de nouvelles mesures IMU';
+ }catch(error){state.textContent='Connexion au Pi interrompue';}
+ while(history.length&&history[0].t<now-10)history.shift();
+ draw('acc',now);draw('gyro',now);
+ setTimeout(refresh,100); // Une seule requête à la fois, sans accumulation.
+}
+refresh();
+</script></html>

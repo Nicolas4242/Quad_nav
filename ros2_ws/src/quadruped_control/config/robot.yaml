@@ -1,0 +1,24 @@
+# Chaque bloc porte le nom du nœud qui recevra ses paramètres.
+serial_bridge:
+  ros__parameters:
+    serial_port: "/dev/ttyUSB0"
+    baud_rate: 115200
+    imu_frame_id: "imu_link"
+    # true si l'Arduino transmet les vitesses angulaires en degrés/s.
+    gyro_in_degrees: true
+
+camera:
+  ros__parameters:
+    camera: 0
+    # Résolution des images publiées dans ROS.
+    width: 640
+    height: 480
+    # Mode capteur déjà testé : évite le recadrage du mode 640x480.
+    sensor_mode: "1640:1232"
+    orientation: 180
+
+web_video_server:
+  ros__parameters:
+    port: 8080
+    # Profil d'abonnement compatible avec les images de la caméra.
+    default_qos_profile: "sensor_data"
